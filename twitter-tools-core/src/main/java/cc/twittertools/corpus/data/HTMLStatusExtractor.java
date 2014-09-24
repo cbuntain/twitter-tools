@@ -73,7 +73,7 @@ public class HTMLStatusExtractor {
 	Elements js_stats_retweets = doc.select("li.js-stat-retweets");
 	if (!js_stats_retweets.isEmpty()) {
 	    status.addProperty("retweeted", true);
-	    String count = js_stats_retweets.select("strong").first().text();
+	    String count = js_stats_retweets.select("strong").first().text().replace(",", "");
 	    status.addProperty("retweet_count", Long.parseLong(count));
 	} else {
 	    status.addProperty("retweeted", false);

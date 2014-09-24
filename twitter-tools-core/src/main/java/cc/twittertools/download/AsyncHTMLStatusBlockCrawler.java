@@ -18,6 +18,7 @@ package cc.twittertools.download;
 
 import cc.twittertools.corpus.data.HTMLStatusExtractor;
 
+import java.io.Reader;
 import java.io.BufferedReader;
 import java.io.File;
 import java.io.FileInputStream;
@@ -30,6 +31,10 @@ import java.util.Timer;
 import java.util.TimerTask;
 import java.util.concurrent.ConcurrentSkipListMap;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.TimeUnit;
 import java.util.zip.GZIPOutputStream;
 
 import org.apache.commons.cli.CommandLine;
@@ -47,6 +52,7 @@ import com.google.gson.Gson;
 import com.google.gson.JsonObject;
 import com.google.gson.JsonParser;
 import com.google.gson.JsonSyntaxException;
+import com.ning.http.client.ProxyServer;
 import com.ning.http.client.AsyncCompletionHandler;
 import com.ning.http.client.AsyncHttpClient;
 import com.ning.http.client.AsyncHttpClientConfig;
@@ -54,23 +60,33 @@ import com.ning.http.client.HttpResponseHeaders;
 import com.ning.http.client.HttpResponseStatus;
 import com.ning.http.client.Response;
 import com.ning.http.client.extra.ThrottleRequestFilter;
+import com.ning.http.client.providers.grizzly.GrizzlyAsyncHttpProvider;
 
 public class AsyncHTMLStatusBlockCrawler {
   private static final Logger LOG = Logger.getLogger(AsyncHTMLStatusBlockCrawler.class);
 
-  private static final int TWEET_BLOCK_SIZE = 500;
-  private static final int MAX_CONNECTIONS = 100;
-  private static final int CONNECTION_TIMEOUT = 10000;
-  private static final int IDLE_CONNECTION_TIMEOUT = 10000;
-  private static final int REQUEST_TIMEOUT = 10000;
-  private static final int MAX_RETRY_ATTEMPTS = 2;
-  private static final int WAIT_BEFORE_RETRY = 1000;
-  private static final Timer timer = new Timer(true);
-
+    public static final int TWEET_BLOCK_SIZE = 500;
+//    public static int MAX_CONNECTIONS = 100;
+//    public static int CONNECTION_TIMEOUT = 90000;
+//    public static int IDLE_CONNECTION_TIMEOUT = 90000;
+//    public static int REQUEST_TIMEOUT = 90000;
+//    public static int MAX_RETRY_ATTEMPTS = 500;
+//    public static int WAIT_BEFORE_RETRY = 90000;
+    
+    public static int MAX_CONNECTIONS = 100;
+    public static int CONNECTION_TIMEOUT = 10000;
+    public static int IDLE_CONNECTION_TIMEOUT = 10000;
+    public static int REQUEST_TIMEOUT = 10000;
+    public static int MAX_RETRY_ATTEMPTS = 500;
+    public static int WAIT_BEFORE_RETRY = 10000;
+    public static int AWAIT_TERM_TIMEOUT = 90000;
+    
   private static final JsonParser JSON_PARSER = new JsonParser();
   private static final Gson GSON = new Gson();
-
-  private final File file;
+    
+//  private final Timer timer = new Timer(true);
+  private final ScheduledExecutorService scheduler;
+  private final Reader inputReader;
   private final File output;
   private final File repair;
   private final AsyncHttpClient asyncHttpClient;
@@ -86,13 +102,27 @@ public class AsyncHTMLStatusBlockCrawler {
 
   public AsyncHTMLStatusBlockCrawler(File file, String output, String repair,
       boolean noFollow) throws IOException {
-    this.file = Preconditions.checkNotNull(file);
+
+    this(new InputStreamReader(new FileInputStream(file)), output, repair, noFollow);
+  }
+    
+  public AsyncHTMLStatusBlockCrawler(Reader input, String output, String repair,
+      boolean noFollow) throws IOException {
+      
+      this(input, output, repair, noFollow, null);
+  }
+
+  public AsyncHTMLStatusBlockCrawler(Reader input, String output, String repair,
+      boolean noFollow, ProxyServer proxy) throws IOException {
+      
+      
+    scheduler = Executors.newScheduledThreadPool(100);
+      
     this.noFollow = noFollow;
-
-    if (!file.exists()) {
-      throw new IOException(file + " does not exist!");
-    }
-
+      
+    // Set the input reader to the one give
+    this.inputReader = Preconditions.checkNotNull(input);
+      
     // check existence of output's parent directory
     this.output = new File(Preconditions.checkNotNull(output));
     File parent = this.output.getParentFile();
@@ -112,27 +142,37 @@ public class AsyncHTMLStatusBlockCrawler {
       this.repair = null;
     }
 
-    AsyncHttpClientConfig config = new AsyncHttpClientConfig.Builder()
+    AsyncHttpClientConfig.Builder configBuilder = new AsyncHttpClientConfig.Builder()
         .addRequestFilter(new ThrottleRequestFilter(MAX_CONNECTIONS))
         .setConnectionTimeoutInMs(CONNECTION_TIMEOUT)
         .setIdleConnectionInPoolTimeoutInMs(IDLE_CONNECTION_TIMEOUT)
-        .setRequestTimeoutInMs(REQUEST_TIMEOUT).setMaxRequestRetry(0).build();
+        .setRequestTimeoutInMs(REQUEST_TIMEOUT).setMaxRequestRetry(0);
+      
+    if ( proxy != null ) {
+        configBuilder.setProxyServer(proxy);
+    }
+      
+    AsyncHttpClientConfig config = configBuilder.build();
     this.asyncHttpClient = new AsyncHttpClient(config);
   }
+    
+    public AsyncHttpClient getClient() {
+        return this.asyncHttpClient;
+    }
 
   public static String getUrl(long id, String username) {
     Preconditions.checkNotNull(username);
-    return String.format("http://twitter.com/%s/status/%d", username, id);
+    return String.format("https://twitter.com/%s/status/%d", username, id);
   }
 
   public void fetch() throws IOException {
     long start = System.currentTimeMillis();
-    LOG.info("Processing " + file);
+    LOG.info("Processing...");
 
     int cnt = 0;
     BufferedReader data = null;
     try {
-      data = new BufferedReader(new InputStreamReader(new FileInputStream(file)));
+      data = new BufferedReader(inputReader);
       String line;
       while ((line = data.readLine()) != null) {
         try {
@@ -171,6 +211,22 @@ public class AsyncHTMLStatusBlockCrawler {
         e.printStackTrace();
       }
     }
+      
+      // Wait for the timed requests to complete.
+      LOG.info("Waiting for remaining timers to finish!");
+      scheduler.shutdown();
+      for (int i = 0; i < 10; i++) {
+          try {
+              scheduler.awaitTermination(AWAIT_TERM_TIMEOUT, TimeUnit.MILLISECONDS);
+              break;
+          } catch (InterruptedException ie) {
+              try {
+                  Thread.sleep(1000);
+              } catch (Exception e) {
+                  e.printStackTrace();
+              }
+          }
+      }
 
     asyncHttpClient.close();
 
@@ -274,7 +330,7 @@ public class AsyncHTMLStatusBlockCrawler {
           crawlURL(redirect, new TweetFetcherHandler(id, username, redirect, numRetries,
               followRedirects, line));
         } else {
-          LOG.warn("Abandoning redirect: " + url);
+          LOG.warn("Abandoning redirect: " + url + ", " + redirect);
           connections.decrementAndGet();
         }
         return STATE.ABORT;
@@ -324,10 +380,12 @@ public class AsyncHTMLStatusBlockCrawler {
 
     @Override
     public void onThrowable(Throwable t) {
+        LOG.warn("Just thrown! {0}", t);
       retry();
     }
 
     private void retry() {
+        LOG.warn("Retry!");
       if (this.numRetries >= MAX_RETRY_ATTEMPTS) {
         LOG.warn("Abandoning after max retry attempts: " + url);
         crawl_repair.put(id, line);
@@ -335,8 +393,12 @@ public class AsyncHTMLStatusBlockCrawler {
         return;
       }
 
-      timer.schedule(new RetryTask(id, username, url, numRetries + 1, followRedirects),
-          WAIT_BEFORE_RETRY);
+//      timer.schedule(new RetryTask(id, username, url, numRetries + 1, followRedirects),
+//          WAIT_BEFORE_RETRY);
+//        
+        
+        scheduler.schedule(new RetryTask(id, username, url, numRetries + 1, followRedirects),
+                           WAIT_BEFORE_RETRY, TimeUnit.MILLISECONDS);
     }
 
     private class RetryTask extends TimerTask {
